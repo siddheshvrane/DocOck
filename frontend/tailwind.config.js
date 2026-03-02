@@ -19,7 +19,7 @@ export default {
           text: '#1D1D1D',
           muted: '#6B6B6B',
           border: '#E5E5E5',
-          accent: '#D97757', // Subtle Claude-ish accent
+          accent: '#FF5B22', // Subtle Claude-ish accent
           darkBg: '#1A1A1A',
           darkSidebar: '#212121',
           darkSurface: '#262626',

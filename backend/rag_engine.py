@@ -44,3 +44,26 @@ class RAGEngine:
 def process_patient_document(patient_id: int, file_path: str):
     engine = RAGEngine(patient_id)
     return engine.index_documents(file_path)
+
+def index_text_document(patient_id: int, file_path: str, text: str):
+    """
+    Index raw OCR text directly into the RAG vector store.
+    Used by the report upload endpoint after OCR processing.
+    """
+    from langchain.schema import Document as LCDocument
+
+    engine = RAGEngine(patient_id)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
+    docs = text_splitter.create_documents(
+        texts=[text],
+        metadatas=[{"source": file_path, "type": "ocr_report"}]
+    )
+
+    if engine.vector_store:
+        engine.vector_store.add_documents(docs)
+    else:
+        engine.vector_store = Chroma.from_documents(
+            documents=docs,
+            embedding=engine.embeddings,
+            persist_directory=engine.persist_directory
+        )

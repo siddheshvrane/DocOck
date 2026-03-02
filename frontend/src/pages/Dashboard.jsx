@@ -1,25 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import {
-    Plus,
-    MessageSquare,
-    Users,
-    Settings,
-    Sun,
-    Moon,
-    Send,
-    FileText,
-    Search,
-    ChevronRight,
-    Loader2
-} from 'lucide-react';
-import { clsx } from 'clsx';
-import { twMerge } from 'tailwind-merge';
 import axios from 'axios';
-import PixelMascot from '../components/PixelMascot';
-
-function cn(...inputs) {
-    return twMerge(clsx(inputs));
-}
+import Sidebar from '../components/dashboard/Sidebar';
+import LandingPage from '../components/dashboard/LandingPage';
+import IntakeView from '../components/dashboard/IntakeView';
+import ConsultationView from '../components/dashboard/ConsultationView';
 
 export default function Dashboard({ isDarkMode, toggleTheme }) {
     const [activePatient, setActivePatient] = useState(null);
@@ -27,14 +11,21 @@ export default function Dashboard({ isDarkMode, toggleTheme }) {
     const [chatMessage, setChatMessage] = useState("");
     const [patients, setPatients] = useState([]);
     const [isLoading, setIsLoading] = useState(false);
+    const [isStreaming, setIsStreaming] = useState(false);
     const [isIntakeMode, setIsIntakeMode] = useState(false);
     const [intakeMessages, setIntakeMessages] = useState([
-        { role: 'assistant', content: 'Hello! I am DocOc. To get started, could you please provide the patient\'s full name, age, gender, and a brief medical history?' }
+        { role: 'assistant', content: "New patient intake. What is the patient's full name?" }
     ]);
     const [greeting, setGreeting] = useState("Hello Doctor. How can I assist you today?");
     const [messages, setMessages] = useState([
         { role: 'assistant', content: 'Hello Doctor. How can I assist you with patient records today?' }
     ]);
+
+    // Report upload states
+    const [uploadingFile, setUploadingFile] = useState(false);
+    const [uploadFileName, setUploadFileName] = useState('');
+    const [uploadError, setUploadError] = useState(null);
+    const fileInputRef = useRef(null);
 
     // Fetch dynamic greeting from LLM
     useEffect(() => {
@@ -67,7 +58,21 @@ export default function Dashboard({ isDarkMode, toggleTheme }) {
         try {
             const res = await axios.post(`/api/patients/${patient.id}/sessions/`);
             setActiveSession(res.data);
-            setMessages([{ role: 'assistant', content: `How can I help you with ${patient.name}'s records?` }]);
+            // Build an opening summary for the doctor from known patient data
+            const conditions = patient.chronic_conditions && !['none', 'none reported', 'none known'].includes(patient.chronic_conditions.toLowerCase())
+                ? patient.chronic_conditions : 'none known';
+            const allergies = patient.allergies && !['none', 'none reported', 'none known'].includes(patient.allergies.toLowerCase())
+                ? patient.allergies : 'none known';
+            const meds = patient.current_medications && !['none', 'none reported'].includes(patient.current_medications.toLowerCase())
+                ? patient.current_medications : 'none reported';
+            setMessages([{
+                role: 'assistant',
+                content: `Patient loaded: ${patient.name}, ${patient.age}y, ${patient.sex}${patient.blood_group ? ', ' + patient.blood_group : ''}.\n` +
+                    `Chronic conditions: ${conditions}.\n` +
+                    `Allergies: ${allergies}.\n` +
+                    `Medications: ${meds}.\n\n` +
+                    `What are the presenting symptoms or how can I assist?`
+            }]);
         } catch (err) {
             console.error("Failed to create session", err);
         }
@@ -78,9 +83,80 @@ export default function Dashboard({ isDarkMode, toggleTheme }) {
         setActiveSession(null);
         setIsIntakeMode(true);
         setIntakeMessages([
-            { role: 'assistant', content: 'Hello! I am DocOc. To get started, could you please provide the patient\'s full name, age, gender, and a brief medical history?' }
+            { role: 'assistant', content: "New patient intake. What is the patient's full name?" }
         ]);
         setChatMessage("");
+    };
+
+    // ── Report Upload Handler ─────────────────────────────────────────────────
+    const handleFileUpload = async (e) => {
+        const file = e.target.files[0];
+        if (!file || !activePatient) return;
+
+        // Reset input so the same file can be re-selected if needed
+        e.target.value = '';
+
+        const allowedTypes = [
+            'application/pdf',
+            'image/png', 'image/jpeg', 'image/jpg',
+            'image/tiff', 'image/bmp', 'image/webp'
+        ];
+        if (!allowedTypes.includes(file.type)) {
+            setUploadError('Unsupported file type. Please upload a PDF or image (PNG, JPG, TIFF, BMP, WEBP).');
+            setTimeout(() => setUploadError(null), 5000);
+            return;
+        }
+
+        setUploadingFile(true);
+        setUploadFileName(file.name);
+        setUploadError(null);
+
+        // Add a placeholder "uploading" message to the chat
+        const placeholderMsg = {
+            role: 'report-uploading',
+            content: `📎 Reading **${file.name}**…`,
+            filename: file.name
+        };
+        setMessages(prev => [...prev, placeholderMsg]);
+
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const res = await axios.post(
+                `/api/patients/${activePatient.id}/upload-report/`,
+                formData,
+                { headers: { 'Content-Type': 'multipart/form-data' } }
+            );
+
+            const data = res.data;
+
+            // Replace the placeholder with the real insight card
+            setMessages(prev => {
+                const updated = [...prev];
+                // Find the last uploading placeholder and replace it
+                const idx = updated.findLastIndex(m => m.role === 'report-uploading');
+                if (idx !== -1) {
+                    updated[idx] = {
+                        role: 'report-card',
+                        filename: data.filename,
+                        pageCount: data.page_count,
+                        insights: data.insights,
+                        summary: data.summary,
+                    };
+                }
+                return updated;
+            });
+        } catch (err) {
+            const errMsg = err.response?.data?.detail || 'Upload failed. Please try again.';
+            setUploadError(errMsg);
+            setTimeout(() => setUploadError(null), 6000);
+            // Remove the placeholder on error
+            setMessages(prev => prev.filter(m => m.role !== 'report-uploading'));
+        } finally {
+            setUploadingFile(false);
+            setUploadFileName('');
+        }
     };
 
     const handleSend = async () => {
@@ -104,6 +180,7 @@ export default function Dashboard({ isDarkMode, toggleTheme }) {
             if (!response.body) throw new Error("No response body");
 
             setIsLoading(false);
+            setIsStreaming(true);
 
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
@@ -130,6 +207,7 @@ export default function Dashboard({ isDarkMode, toggleTheme }) {
             });
         } finally {
             setIsLoading(false);
+            setIsStreaming(false);
         }
     };
 
@@ -155,6 +233,7 @@ export default function Dashboard({ isDarkMode, toggleTheme }) {
             if (!response.body) throw new Error("No response body");
 
             setIsLoading(false);
+            setIsStreaming(true);
 
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
@@ -179,13 +258,23 @@ export default function Dashboard({ isDarkMode, toggleTheme }) {
 
                     try {
                         const data = JSON.parse(jsonStr);
-                        setPatients(prev => [data.patient, ...prev]);
+                        const p = data.patient;
+                        setPatients(prev => [p, ...prev]);
                         setIsIntakeMode(false);
-                        setActivePatient(data.patient);
-                        setActiveSession({ id: data.session_id, patient_id: data.patient.id, title: "Initial Consultation" });
-                        setMessages([
-                            { role: 'assistant', content: `Intake complete. What are ${data.patient.name}'s current symptoms?` }
-                        ]);
+                        setActivePatient(p);
+                        setActiveSession({ id: data.session_id, patient_id: p.id, title: "Initial Consultation" });
+                        // Build opening clinical summary from what was just captured
+                        const conditions = p.chronic_conditions && !['none', 'none reported', 'none known'].includes(p.chronic_conditions.toLowerCase())
+                            ? p.chronic_conditions : 'none known';
+                        const allergies = p.allergies && !['none', 'none reported', 'none known'].includes(p.allergies.toLowerCase())
+                            ? p.allergies : 'none known';
+                        setMessages([{
+                            role: 'assistant',
+                            content: `Patient registered: ${p.name}, ${p.age}y, ${p.sex}${p.blood_group ? ', ' + p.blood_group : ''}.\n` +
+                                `Chronic conditions: ${conditions}.\n` +
+                                `Allergies: ${allergies}.\n\n` +
+                                `I have the full profile. What are the presenting symptoms?`
+                        }]);
                         return;
                     } catch (e) { console.error("Parse error", e); }
                 } else {
@@ -204,331 +293,207 @@ export default function Dashboard({ isDarkMode, toggleTheme }) {
             });
         } finally {
             setIsLoading(false);
+            setIsStreaming(false);
+        }
+    };
+
+    const handleRetry = async () => {
+        if (messages.length < 2 || isLoading) return;
+
+        // Find the last user message
+        let lastUserIndex = messages.length - 1;
+        while (lastUserIndex >= 0 && messages[lastUserIndex].role !== 'user') {
+            lastUserIndex--;
+        }
+
+        if (lastUserIndex < 0) return;
+
+        const previousMessages = messages.slice(0, lastUserIndex + 1);
+        const lastUserMsg = messages[lastUserIndex].content;
+
+        setIsLoading(true);
+        setMessages([...previousMessages, { role: 'assistant', content: '' }]);
+
+        const accumulatedRef = { current: '' };
+
+        try {
+            const response = await fetch(`/api/chat/generate?prompt=${encodeURIComponent(lastUserMsg)}&session_id=${activeSession.id}`, {
+                method: 'POST'
+            });
+
+            if (!response.body) throw new Error("No response body");
+
+            setIsLoading(false);
+            setIsStreaming(true);
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const chunk = decoder.decode(value, { stream: true });
+                if (chunk) {
+                    accumulatedRef.current += chunk;
+                    setMessages(prev => {
+                        const updated = [...prev];
+                        updated[updated.length - 1] = { role: 'assistant', content: accumulatedRef.current };
+                        return updated;
+                    });
+                }
+            }
+        } catch (err) {
+            setMessages(prev => {
+                const updated = [...prev];
+                updated[updated.length - 1] = { role: 'assistant', content: "Error communicating with local LLM. Is Ollama running?" };
+                return updated;
+            });
+        } finally {
+            setIsLoading(false);
+            setIsStreaming(false);
+        }
+    };
+
+    const handleIntakeRetry = async () => {
+        if (intakeMessages.length < 2 || isLoading) return;
+
+        let lastUserIndex = intakeMessages.length - 1;
+        while (lastUserIndex >= 0 && intakeMessages[lastUserIndex].role !== 'user') {
+            lastUserIndex--;
+        }
+
+        if (lastUserIndex < 0) return;
+
+        const previousMessages = intakeMessages.slice(0, lastUserIndex + 1);
+        setIsLoading(true);
+        setIntakeMessages([...previousMessages, { role: 'assistant', content: '' }]);
+
+        const accRef = { current: '' };
+
+        try {
+            const response = await fetch('/api/chat/intake', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ messages: previousMessages })
+            });
+
+            if (!response.body) throw new Error("No response body");
+
+            setIsLoading(false);
+            setIsStreaming(true);
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const chunk = decoder.decode(value, { stream: true });
+                accRef.current += chunk;
+
+                if (accRef.current.includes("__INTAKE_COMPLETE__")) {
+                    const parts = accRef.current.split("__INTAKE_COMPLETE__");
+                    const visibleText = parts[0];
+                    const jsonStr = parts[1];
+
+                    setIntakeMessages(prev => {
+                        const updated = [...prev];
+                        updated[updated.length - 1] = { role: 'assistant', content: visibleText };
+                        return updated;
+                    });
+
+                    try {
+                        const data = JSON.parse(jsonStr);
+                        const p = data.patient;
+                        setPatients(prev => [p, ...prev]);
+                        setIsIntakeMode(false);
+                        setActivePatient(p);
+                        setActiveSession({ id: data.session_id, patient_id: p.id, title: "Initial Consultation" });
+
+                        const conditions = p.chronic_conditions && !['none', 'none reported', 'none known'].includes(p.chronic_conditions.toLowerCase())
+                            ? p.chronic_conditions : 'none known';
+                        const allergies = p.allergies && !['none', 'none reported', 'none known'].includes(p.allergies.toLowerCase())
+                            ? p.allergies : 'none known';
+                        setMessages([{
+                            role: 'assistant',
+                            content: `Patient registered: ${p.name}, ${p.age}y, ${p.sex}${p.blood_group ? ', ' + p.blood_group : ''}.\n` +
+                                `Chronic conditions: ${conditions}.\n` +
+                                `Allergies: ${allergies}.\n\n` +
+                                `I have the full profile. What are the presenting symptoms?`
+                        }]);
+                        return;
+                    } catch (e) { console.error("Parse error", e); }
+                } else {
+                    setIntakeMessages(prev => {
+                        const updated = [...prev];
+                        updated[updated.length - 1] = { role: 'assistant', content: accRef.current };
+                        return updated;
+                    });
+                }
+            }
+        } catch (err) {
+            setIntakeMessages(prev => {
+                const updated = [...prev];
+                updated[updated.length - 1] = { role: 'assistant', content: "Error communicating with local LLM. Is Ollama running?" };
+                return updated;
+            });
+        } finally {
+            setIsLoading(false);
+            setIsStreaming(false);
         }
     };
 
     return (
         <div className="flex h-screen overflow-hidden font-sans selection:bg-claude-accent/20 bg-claude-bg dark:bg-claude-darkBg transition-colors duration-500">
-            {/* Sidebar - Claude Style */}
-            <aside className="w-72 bg-claude-sidebar dark:bg-claude-darkSidebar border-r border-claude-border dark:border-claude-darkBorder flex flex-col transition-all duration-500 ease-in-out">
-                <div className="p-6 flex items-center justify-between">
-                    <div className="flex items-center gap-2 cursor-pointer" onClick={() => { setActivePatient(null); setIsIntakeMode(false); }}>
-                        <div className="w-8 h-8 bg-claude-accent rounded-lg flex items-center justify-center text-white font-bold shadow-premium">
-                            D
-                        </div>
-                        <h1 className="font-bold text-xl tracking-tight text-claude-text dark:text-claude-darkText">DocOc</h1>
-                    </div>
-                    <button
-                        onClick={toggleTheme}
-                        className="p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 transition-all text-claude-muted dark:text-claude-darkMuted active:scale-95"
-                    >
-                        {isDarkMode ? <Sun size={18} /> : <Moon size={18} />}
-                    </button>
-                </div>
+            <Sidebar
+                isDarkMode={isDarkMode}
+                toggleTheme={toggleTheme}
+                activePatient={activePatient}
+                isIntakeMode={isIntakeMode}
+                startNewIntake={startNewIntake}
+                setActivePatient={setActivePatient}
+                setIsIntakeMode={setIsIntakeMode}
+            />
 
-                <div className="px-4 mb-4">
-                    <button onClick={startNewIntake} className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-white dark:bg-claude-darkSurface border border-claude-border dark:border-claude-darkBorder rounded-2xl shadow-premium hover:translate-y-[-1px] active:translate-y-[1px] transition-all font-semibold text-sm text-claude-text dark:text-claude-darkText group">
-                        <Plus size={18} className="text-claude-accent group-hover:rotate-90 transition-transform duration-300" />
-                        New Consultation
-                    </button>
-                </div>
-
-                <nav className="flex-1 overflow-y-auto custom-scrollbar px-3 space-y-1">
-                    <div className="px-4 py-3 text-[11px] font-bold text-claude-muted/60 dark:text-claude-darkMuted/40 uppercase tracking-[0.15em]">System</div>
-                    <button
-                        onClick={() => { setActivePatient(null); setIsIntakeMode(false); }}
-                        className={cn(
-                            "w-full text-left px-4 py-3.5 rounded-2xl transition-all group flex items-center gap-4",
-                            (!activePatient && !isIntakeMode) ? "bg-white dark:bg-claude-darkSurface shadow-premium text-claude-text dark:text-claude-darkText" : "hover:bg-black/5 dark:hover:bg-white/5 text-claude-muted dark:text-claude-darkMuted"
-                        )}
-                    >
-                        <MessageSquare size={18} className={(!activePatient && !isIntakeMode) ? "text-claude-accent" : ""} />
-                        <span className="text-sm font-semibold">Dashboard</span>
-                    </button>
-                </nav>
-
-                <div className="p-4 border-t border-claude-border dark:border-claude-darkBorder">
-                    <button className="w-full flex items-center gap-3 px-4 py-3 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 text-sm font-semibold text-claude-muted dark:text-claude-darkMuted transition-all active:scale-[0.98]">
-                        <Settings size={18} /> Settings
-                    </button>
-                </div>
-            </aside>
-
-            {/* Main Content Area */}
             <main className="flex-1 flex flex-col relative bg-claude-bg dark:bg-claude-darkBg transition-colors duration-500">
                 {isIntakeMode ? (
-                    /* Patient Intake View */
-                    <>
-                        {/* Header */}
-                        <header className="h-20 border-b border-claude-border/60 dark:border-claude-darkBorder/60 flex items-center justify-between px-8 bg-claude-bg/80 dark:bg-claude-darkBg/80 backdrop-blur-xl z-20 transition-all">
-                            <div className="flex items-center gap-4 animate-in fade-in slide-in-from-left-4 duration-500">
-                                <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-claude-accent to-orange-400 flex items-center justify-center text-white font-bold shadow-lg shadow-claude-accent/20">
-                                    <Plus size={20} />
-                                </div>
-                                <div>
-                                    <h2 className="text-base font-bold text-claude-text dark:text-claude-darkText tracking-tight">New Patient Intake</h2>
-                                    <div className="flex items-center gap-2">
-                                        <p className="text-[11px] text-claude-muted font-bold uppercase tracking-wider">Gathering Demographics & History</p>
-                                    </div>
-                                </div>
-                            </div>
-                        </header>
-
-                        {/* Intake Messages Area */}
-                        <div className="flex-1 overflow-y-auto custom-scrollbar px-8 transition-all">
-                            <div className="max-w-3xl mx-auto py-12 space-y-12">
-                                {intakeMessages.map((m, i) => (
-                                    <div key={i} className={cn(
-                                        "flex gap-6 animate-in fade-in slide-in-from-bottom-6 duration-700 ease-out",
-                                        m.role === 'user' ? "flex-row-reverse text-right" : "text-left"
-                                    )}>
-                                        <div className={cn(
-                                            "w-10 h-10 rounded-2xl flex-shrink-0 flex items-center justify-center text-[10px] font-black tracking-tighter shadow-premium transition-all",
-                                            m.role === 'assistant'
-                                                ? "bg-claude-accent text-white"
-                                                : "bg-claude-text dark:bg-white text-white dark:text-black"
-                                        )}>
-                                            {m.role === 'assistant' ? 'AI' : 'DR'}
-                                        </div>
-                                        <div className="max-w-[80%] space-y-2">
-                                            <div className={cn(
-                                                "text-[17px] leading-[1.7] text-claude-text dark:text-claude-darkText whitespace-pre-wrap py-1 selection:bg-claude-accent/20",
-                                                m.role === 'assistant' ? "font-serif" : "font-sans font-medium"
-                                            )}>
-                                                {m.content}
-                                            </div>
-                                        </div>
-                                    </div>
-                                ))}
-
-                                {isLoading && (
-                                    <div className="flex gap-6 animate-pulse">
-                                        <div className="w-10 h-10 rounded-2xl bg-claude-accent/20 flex items-center justify-center">
-                                            <Loader2 size={16} className="animate-spin text-claude-accent" />
-                                        </div>
-                                        <div className="space-y-3 flex-1 pt-2">
-                                            <div className="h-3 bg-claude-border dark:bg-claude-darkBorder rounded-full w-3/4"></div>
-                                            <div className="h-3 bg-claude-border dark:bg-claude-darkBorder rounded-full w-1/2"></div>
-                                        </div>
-                                    </div>
-                                )}
-                                <div className="h-4" />
-                            </div>
-                        </div>
-
-                        {/* Intake Input */}
-                        <div className="p-8 pb-10 bg-gradient-to-t from-claude-bg via-claude-bg to-transparent dark:from-claude-darkBg dark:via-claude-darkBg z-20">
-                            <div className="max-w-3xl mx-auto relative group">
-                                <div className="absolute -inset-1 bg-gradient-to-r from-claude-accent/10 to-orange-400/10 rounded-[2rem] blur opacity-0 group-focus-within:opacity-100 transition-opacity duration-500" />
-                                <div className="relative">
-                                    <textarea
-                                        rows="1"
-                                        value={chatMessage}
-                                        onChange={(e) => {
-                                            setChatMessage(e.target.value);
-                                            e.target.style.height = 'auto';
-                                            e.target.style.height = e.target.scrollHeight + 'px';
-                                        }}
-                                        placeholder="Enter patient details..."
-                                        className="w-full bg-white dark:bg-claude-darkSurface border border-claude-border dark:border-claude-darkBorder rounded-3xl py-6 pl-8 pr-16 text-[16px] focus:outline-none focus:ring-2 focus:ring-claude-accent/20 focus:border-claude-accent/40 resize-none transition-all shadow-premium group-hover:shadow-xl disabled:opacity-50 min-h-[72px] max-h-48 custom-scrollbar"
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter' && !e.shiftKey) {
-                                                e.preventDefault();
-                                                handleIntakeSend();
-                                            }
-                                        }}
-                                    />
-                                    <button
-                                        onClick={handleIntakeSend}
-                                        disabled={!chatMessage.trim() || isLoading}
-                                        className="absolute right-4 bottom-4 p-3 bg-claude-accent text-white rounded-2xl hover:scale-110 hover:shadow-lg hover:shadow-claude-accent/30 active:scale-95 transition-all disabled:opacity-20 disabled:hover:scale-100 shadow-premium"
-                                    >
-                                        <Send size={18} />
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </>
+                    <IntakeView
+                        intakeMessages={intakeMessages}
+                        isStreaming={isStreaming}
+                        isLoading={isLoading}
+                        chatMessage={chatMessage}
+                        setChatMessage={setChatMessage}
+                        handleIntakeSend={handleIntakeSend}
+                        handleIntakeRetry={handleIntakeRetry}
+                    />
                 ) : !activePatient ? (
-                    /* Landing Page - Claude "Chats" View */
-                    <div className="flex-1 flex flex-row p-12 overflow-hidden relative max-w-7xl mx-auto w-full gap-10">
-                        {/* Mascot on the Left */}
-                        <div className="hidden lg:flex flex-col items-center justify-center flex-1 animate-in fade-in slide-in-from-left-8 duration-1000">
-                            <div className="relative w-72 h-72 flex items-center justify-center">
-                                <PixelMascot className="w-64 h-64 scale-110" />
-                            </div>
-                            {/* Dynamic LLM Greeting */}
-                            <div className="mt-8 text-center animate-in fade-in slide-in-from-bottom-4 duration-1000 delay-500">
-                                <p className="text-xl font-serif text-claude-text dark:text-claude-darkText tracking-tight leading-relaxed max-w-sm italic opacity-80">
-                                    "{greeting}"
-                                </p>
-                            </div>
-                        </div>
-
-                        {/* Recent Chats on the Right */}
-                        <div className="flex-[2.5] flex flex-col h-full justify-center space-y-8 animate-in fade-in slide-in-from-right-8 duration-1000">
-                            <div className="flex items-center justify-between mb-2">
-                                <h1 className="text-4xl font-serif font-medium text-claude-text dark:text-claude-darkText">Recent Chats</h1>
-                                <button onClick={startNewIntake} className="flex items-center gap-2 py-2 px-4 bg-white dark:bg-claude-darkSurface border border-claude-border dark:border-claude-darkBorder rounded-xl shadow-premium hover:shadow-lg transition-all font-semibold text-sm">
-                                    <Plus size={16} /> New chat
-                                </button>
-                            </div>
-
-                            {/* Search Bar */}
-                            <div className="relative group">
-                                <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
-                                    <Search size={18} className="text-claude-muted group-focus-within:text-claude-accent transition-colors" />
-                                </div>
-                                <input
-                                    type="text"
-                                    placeholder="Search your chats..."
-                                    className="w-full bg-white dark:bg-claude-darkSurface border-2 border-claude-border dark:border-claude-darkBorder rounded-xl py-4 pl-12 pr-4 focus:outline-none focus:border-claude-accent/40 shadow-premium transition-all text-base"
-                                />
-                            </div>
-
-                            <p className="text-xs font-semibold text-claude-muted dark:text-claude-darkMuted uppercase tracking-widest pl-1">Recent Consultations</p>
-
-                            {/* Chat List with Fading effect */}
-                            <div className="relative flex-1 max-h-[500px]">
-                                <div className="mt-2 h-full overflow-y-auto custom-scrollbar space-y-1 pb-20 mask-gradient">
-                                    {patients.length > 0 ? patients.map(p => (
-                                        <button
-                                            key={p.id}
-                                            onClick={() => handlePatientSelect(p)}
-                                            className="w-full text-left p-6 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 transition-all group flex items-start gap-4 border border-transparent hover:border-claude-border/40 dark:hover:border-claude-darkBorder/40"
-                                        >
-                                            <div className="w-12 h-12 rounded-xl bg-claude-sidebar dark:bg-claude-darkSidebar flex items-center justify-center text-lg font-bold group-hover:bg-claude-accent group-hover:text-white transition-all shadow-sm">
-                                                {p.name[0]}
-                                            </div>
-                                            <div className="flex-1 min-w-0">
-                                                <div className="text-lg font-semibold text-claude-text dark:text-claude-darkText truncate group-hover:text-claude-accent transition-colors">
-                                                    Consultation with {p.name}
-                                                </div>
-                                                <div className="text-sm text-claude-muted dark:text-claude-darkMuted mt-1">
-                                                    Last updated 2 days ago
-                                                </div>
-                                            </div>
-                                            <ChevronRight className="self-center text-claude-muted opacity-0 group-hover:opacity-100 transition-all translate-x-[-10px] group-hover:translate-x-0" />
-                                        </button>
-                                    )) : (
-                                        <div className="py-20 text-center">
-                                            <div className="w-16 h-16 bg-claude-sidebar dark:bg-claude-darkSidebar rounded-full flex items-center justify-center mx-auto mb-4 opacity-40">
-                                                <MessageSquare size={24} />
-                                            </div>
-                                            <p className="text-claude-muted italic">No recent chats found.</p>
-                                        </div>
-                                    )}
-                                </div>
-                                {/* Bottom Fade Overlay */}
-                                <div className="absolute bottom-0 left-0 w-full h-32 bg-gradient-to-t from-claude-bg dark:from-claude-darkBg via-claude-bg/80 dark:via-claude-darkBg/80 to-transparent pointer-events-none z-10" />
-                            </div>
-                        </div>
-                    </div>
+                    <LandingPage
+                        greeting={greeting}
+                        patients={patients}
+                        startNewIntake={startNewIntake}
+                        handlePatientSelect={handlePatientSelect}
+                    />
                 ) : (
-                    /* Active Consultation View */
-                    <>
-                        {/* Chat Header */}
-                        <header className="h-20 border-b border-claude-border/60 dark:border-claude-darkBorder/60 flex items-center justify-between px-8 bg-claude-bg/80 dark:bg-claude-darkBg/80 backdrop-blur-xl z-20 transition-all">
-                            <div className="flex items-center gap-4">
-                                <div className="flex items-center gap-4 animate-in fade-in slide-in-from-left-4 duration-500">
-                                    <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-claude-accent to-orange-400 flex items-center justify-center text-white font-bold shadow-lg shadow-claude-accent/20">
-                                        {activePatient.name[0]}
-                                    </div>
-                                    <div>
-                                        <h2 className="text-base font-bold text-claude-text dark:text-claude-darkText tracking-tight">{activePatient.name}</h2>
-                                        <div className="flex items-center gap-2">
-                                            <span className="relative flex h-2 w-2">
-                                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                                                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-                                            </span>
-                                            <p className="text-[11px] text-green-600 dark:text-green-500 font-bold uppercase tracking-wider">Clinical Insight Active</p>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="flex items-center gap-3">
-                                <button className="p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 transition-all text-claude-muted active:scale-95"><Search size={20} /></button>
-                                <button className="p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 transition-all text-claude-muted active:scale-95"><FileText size={20} /></button>
-                            </div>
-                        </header>
-
-                        {/* Messages Area */}
-                        <div className="flex-1 overflow-y-auto custom-scrollbar px-8 transition-all">
-                            <div className="max-w-3xl mx-auto py-12 space-y-12">
-                                {messages.map((m, i) => (
-                                    <div key={i} className={cn(
-                                        "flex gap-6 animate-in fade-in slide-in-from-bottom-6 duration-700 ease-out",
-                                        m.role === 'user' ? "flex-row-reverse text-right" : "text-left"
-                                    )}>
-                                        <div className={cn(
-                                            "w-10 h-10 rounded-2xl flex-shrink-0 flex items-center justify-center text-[10px] font-black tracking-tighter shadow-premium transition-all",
-                                            m.role === 'assistant'
-                                                ? "bg-claude-accent text-white"
-                                                : "bg-claude-text dark:bg-white text-white dark:text-black"
-                                        )}>
-                                            {m.role === 'assistant' ? 'AI' : 'DR'}
-                                        </div>
-                                        <div className="max-w-[80%] space-y-2">
-                                            <div className={cn(
-                                                "text-[17px] leading-[1.7] text-claude-text dark:text-claude-darkText whitespace-pre-wrap py-1 selection:bg-claude-accent/20",
-                                                m.role === 'assistant' ? "font-serif" : "font-sans font-medium"
-                                            )}>
-                                                {m.content}
-                                            </div>
-                                        </div>
-                                    </div>
-                                ))}
-
-                                {isLoading && (
-                                    <div className="flex gap-6 animate-pulse">
-                                        <div className="w-10 h-10 rounded-2xl bg-claude-accent/20 flex items-center justify-center">
-                                            <Loader2 size={16} className="animate-spin text-claude-accent" />
-                                        </div>
-                                        <div className="space-y-3 flex-1 pt-2">
-                                            <div className="h-3 bg-claude-border dark:bg-claude-darkBorder rounded-full w-3/4"></div>
-                                            <div className="h-3 bg-claude-border dark:bg-claude-darkBorder rounded-full w-1/2"></div>
-                                        </div>
-                                    </div>
-                                )}
-                                <div className="h-4" />
-                            </div>
-                        </div>
-
-                        {/* Message Input */}
-                        <div className="p-8 pb-10 bg-gradient-to-t from-claude-bg via-claude-bg to-transparent dark:from-claude-darkBg dark:via-claude-darkBg z-20">
-                            <div className="max-w-3xl mx-auto relative group">
-                                <div className="absolute -inset-1 bg-gradient-to-r from-claude-accent/10 to-orange-400/10 rounded-[2rem] blur opacity-0 group-focus-within:opacity-100 transition-opacity duration-500" />
-                                <div className="relative">
-                                    <textarea
-                                        rows="1"
-                                        value={chatMessage}
-                                        onChange={(e) => {
-                                            setChatMessage(e.target.value);
-                                            e.target.style.height = 'auto';
-                                            e.target.style.height = e.target.scrollHeight + 'px';
-                                        }}
-                                        disabled={!activeSession}
-                                        placeholder={`Ask DocOc about ${activePatient.name}'s records...`}
-                                        className="w-full bg-white dark:bg-claude-darkSurface border border-claude-border dark:border-claude-darkBorder rounded-3xl py-6 pl-8 pr-16 text-[16px] focus:outline-none focus:ring-2 focus:ring-claude-accent/20 focus:border-claude-accent/40 resize-none transition-all shadow-premium group-hover:shadow-xl disabled:opacity-50 min-h-[72px] max-h-48 custom-scrollbar"
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter' && !e.shiftKey) {
-                                                e.preventDefault();
-                                                handleSend();
-                                            }
-                                        }}
-                                    />
-                                    <button
-                                        onClick={handleSend}
-                                        disabled={!chatMessage.trim() || !activeSession || isLoading}
-                                        className="absolute right-4 bottom-4 p-3 bg-claude-accent text-white rounded-2xl hover:scale-110 hover:shadow-lg hover:shadow-claude-accent/30 active:scale-95 transition-all disabled:opacity-20 disabled:hover:scale-100 shadow-premium"
-                                    >
-                                        <Send size={18} />
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </>
+                    <ConsultationView
+                        activePatient={activePatient}
+                        activeSession={activeSession}
+                        messages={messages}
+                        isLoading={isLoading}
+                        isStreaming={isStreaming}
+                        chatMessage={chatMessage}
+                        setChatMessage={setChatMessage}
+                        handleSend={handleSend}
+                        handleRetry={handleRetry}
+                        uploadError={uploadError}
+                        setUploadError={setUploadError}
+                        uploadingFile={uploadingFile}
+                        uploadFileName={uploadFileName}
+                        handleFileUpload={handleFileUpload}
+                    />
                 )}
+
                 {/* Global Footer */}
                 <div className="absolute bottom-4 left-0 right-0 pointer-events-none flex justify-center">
                     <div className="flex items-center gap-4 opacity-40 hover:opacity-100 transition-opacity pointer-events-auto cursor-default">
@@ -542,5 +507,4 @@ export default function Dashboard({ isDarkMode, toggleTheme }) {
             </main>
         </div>
     );
-
 }
